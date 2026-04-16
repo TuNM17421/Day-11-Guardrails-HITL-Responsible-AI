@@ -28,6 +28,37 @@ from core.config import ALLOWED_TOPICS, BLOCKED_TOPICS
 # - "act as (a |an )?unrestricted"
 # ============================================================
 
+def find_injection_pattern(user_input: str) -> str | None:
+    """Return the first prompt-injection pattern matched in user input.
+
+    This helper makes it easier to explain *why* a request was blocked,
+    which is useful for notebook demos and security audit logs.
+
+    Args:
+        user_input: The user's message.
+
+    Returns:
+        The matching regex pattern as a string, or None if nothing matched.
+    """
+    injection_patterns = [
+        r"ignore\s+(all\s+)?(previous|prior|above)\s+instructions",
+        r"you\s+are\s+now\b",
+        r"system\s+prompt",
+        r"reveal\s+(your|the)\s+(instructions|prompt|password|api\s*key|credentials?)",
+        r"pretend\s+you\s+are",
+        r"act\s+as\s+(a\s+|an\s+)?(unrestricted|jailbroken)",
+        r"(base64|rot13|json|yaml).*(system\s+prompt|instructions|config)",
+        r"b[oỏ]\s*qua\s+m[oọ]i\s+h[ưu]ớng\s+dẫn",
+        r"(admin\s+password|api\s*key|database\s+connection\s+string|credentials?)",
+        r"select\s+\*\s+from\s+\w+",
+    ]
+
+    for pattern in injection_patterns:
+        if re.search(pattern, user_input or "", re.IGNORECASE):
+            return pattern
+    return None
+
+
 def detect_injection(user_input: str) -> bool:
     """Detect prompt injection patterns in user input.
 
@@ -37,16 +68,7 @@ def detect_injection(user_input: str) -> bool:
     Returns:
         True if injection detected, False otherwise
     """
-    INJECTION_PATTERNS = [
-        # TODO: Add at least 5 regex patterns
-        # Example:
-        # r"ignore (all )?(previous|above) instructions",
-    ]
-
-    for pattern in INJECTION_PATTERNS:
-        if re.search(pattern, user_input, re.IGNORECASE):
-            return True
-    return False
+    return find_injection_pattern(user_input) is not None
 
 
 # ============================================================
@@ -62,20 +84,37 @@ def detect_injection(user_input: str) -> bool:
 def topic_filter(user_input: str) -> bool:
     """Check if input is off-topic or contains blocked topics.
 
+    This layer catches non-banking questions, dangerous requests, and malformed
+    inputs that are unlikely to be legitimate customer-service requests.
+
     Args:
         user_input: The user's message
 
     Returns:
         True if input should be BLOCKED (off-topic or blocked topic)
     """
-    input_lower = user_input.lower()
+    input_lower = (user_input or "").strip().lower()
 
-    # TODO: Implement logic:
-    # 1. If input contains any blocked topic -> return True
-    # 2. If input doesn't contain any allowed topic -> return True
-    # 3. Otherwise -> return False (allow)
+    if not input_lower:
+        return True
 
-    pass  # Replace with your implementation
+    if len(input_lower) > 5000:
+        return True
+
+    if any(blocked in input_lower for blocked in BLOCKED_TOPICS):
+        return True
+
+    # Reject emoji-only / symbol-only content and obvious off-topic SQL probing.
+    if not re.search(r"[a-zA-ZÀ-ỹ0-9]", input_lower):
+        return True
+
+    if re.search(r"\b(select|drop|union|insert|delete)\b", input_lower):
+        return True
+
+    if any(topic in input_lower for topic in ALLOWED_TOPICS):
+        return False
+
+    return True
 
 
 # ============================================================
@@ -90,10 +129,16 @@ def topic_filter(user_input: str) -> bool:
 # ============================================================
 
 class InputGuardrailPlugin(base_plugin.BasePlugin):
-    """Plugin that blocks bad input before it reaches the LLM."""
+    """Plugin that blocks bad input before it reaches the LLM.
 
-    def __init__(self):
+    This layer is needed because many attacks should be stopped *before* the
+    model ever sees them. It helps catch prompt injection, off-topic queries,
+    and other risky requests early.
+    """
+
+    def __init__(self, audit_logger=None):
         super().__init__(name="input_guardrail")
+        self.audit_logger = audit_logger
         self.blocked_count = 0
         self.total_count = 0
 
@@ -128,14 +173,34 @@ class InputGuardrailPlugin(base_plugin.BasePlugin):
         self.total_count += 1
         text = self._extract_text(user_message)
 
-        # TODO: Implement logic:
-        # 1. Call detect_injection(text)
-        #    - If True: increment blocked_count, return self._block_response("...")
-        # 2. Call topic_filter(text)
-        #    - If True: increment blocked_count, return self._block_response("...")
-        # 3. If both are False: return None (let message through)
+        matched_pattern = find_injection_pattern(text)
+        if matched_pattern:
+            self.blocked_count += 1
+            if self.audit_logger is not None and hasattr(self.audit_logger, "record_block"):
+                self.audit_logger.record_block(
+                    user_id=getattr(invocation_context, "user_id", None) or "anonymous",
+                    input_text=text,
+                    blocked_layer="input_guardrail",
+                    output_text=f"Blocked by regex: {matched_pattern}",
+                )
+            return self._block_response(
+                f"Request blocked by input guardrails. Detected prompt-injection pattern: {matched_pattern}"
+            )
 
-        pass  # Replace with your implementation
+        if topic_filter(text):
+            self.blocked_count += 1
+            if self.audit_logger is not None and hasattr(self.audit_logger, "record_block"):
+                self.audit_logger.record_block(
+                    user_id=getattr(invocation_context, "user_id", None) or "anonymous",
+                    input_text=text,
+                    blocked_layer="topic_filter",
+                    output_text="Request is off-topic, malformed, or unsafe.",
+                )
+            return self._block_response(
+                "I can only help with safe banking-related questions about accounts, cards, transfers, loans, and savings."
+            )
+
+        return None
 
 
 # ============================================================
