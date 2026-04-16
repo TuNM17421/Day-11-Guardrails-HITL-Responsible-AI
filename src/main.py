@@ -9,7 +9,6 @@ Usage:
     python main.py --part 3     # Run only Part 3 (testing pipeline)
     python main.py --part 4     # Run only Part 4 (HITL design)
 """
-import sys
 import asyncio
 import argparse
 
@@ -35,7 +34,7 @@ async def part1_attacks():
 
     # TODO 2: Generate AI attack test cases
     print("\n--- Generating AI attacks (TODO 2) ---")
-    ai_attacks = await generate_ai_attacks()
+    await generate_ai_attacks()
 
     return results
 
@@ -83,8 +82,15 @@ async def part3_testing():
     print("PART 3: Security Testing Pipeline")
     print("=" * 60)
 
-    from testing.testing import run_comparison, print_comparison, SecurityTestPipeline
-    from agents.agent import create_unsafe_agent
+    from testing.testing import (
+        run_comparison,
+        print_comparison,
+        SecurityTestPipeline,
+        run_assignment_suite,
+        print_assignment_summary,
+    )
+    from agents.agent import create_protected_agent
+    from core.defense_pipeline import build_production_plugins
 
     # TODO 10: Before vs after comparison
     print("\n--- TODO 10: Before/After Comparison ---")
@@ -96,11 +102,20 @@ async def part3_testing():
 
     # TODO 11: Automated security pipeline
     print("\n--- TODO 11: Security Test Pipeline ---")
-    agent, runner = create_unsafe_agent()
+    plugins, monitor, audit_log = build_production_plugins(use_llm_judge=True)
+    agent, runner = create_protected_agent(plugins=plugins)
     pipeline = SecurityTestPipeline(agent, runner)
     results = await pipeline.run_all()
     if results:
         pipeline.print_report(results)
+        metrics = monitor.check_metrics()
+        print(f"\nMonitoring metrics: {metrics}")
+        export_path = audit_log.export_json("security_audit.json")
+        print(f"Audit log exported to: {export_path}")
+
+        print("\n--- Assignment 11 Required Test Suite ---")
+        summary = await run_assignment_suite()
+        print_assignment_summary(summary)
     else:
         print("Complete TODO 11 to see the pipeline report.")
 
